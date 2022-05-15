@@ -5,14 +5,31 @@
 # and any modifications thereto.  Any use, reproduction, disclosure or
 # distribution of this software and related documentation without an express
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
-
+import sys
 import numpy as np
 import torch
 from torch_utils import training_stats
 from torch_utils import misc
 from torch_utils.ops import conv2d_gradfix
 
+sys.path.insert(1, '/home/misha/stylegan2_pytorch')
+from criteria.id_loss import IDLoss
 #----------------------------------------------------------------------------
+
+
+def resize_img(img_gen):
+    batch, channel, height, width = img_gen.shape
+
+    if height > 256:
+        factor = height // 256
+
+        img_gen = img_gen.reshape(
+            batch, channel, height // factor, factor, width // factor, factor
+        )
+        img_gen = img_gen.mean([3, 5])
+
+    return img_gen
+
 
 class Loss:
     def accumulate_gradients(self, phase, real_img, real_c, gen_z, gen_c, sync, gain): # to be overridden by subclass
@@ -34,8 +51,9 @@ class StyleGAN2Loss(Loss):
         self.pl_decay = pl_decay
         self.pl_weight = pl_weight
         self.pl_mean = torch.zeros([], device=device)
+        self.id_loss = IDLoss("/home/misha/stylegan2_pytorch/data/model_ir_se50.pth").to(device).eval()
 
-    def run_G(self, z, c, sync):
+    def run_G(self, z, c, sync, return_shifted=False):
         with misc.ddp_sync(self.G_mapping, sync):
             ws = self.G_mapping(z, c)
             if self.style_mixing_prob > 0:
@@ -45,6 +63,11 @@ class StyleGAN2Loss(Loss):
                     ws[:, cutoff:] = self.G_mapping(torch.randn_like(z), c, skip_w_avg_update=True)[:, cutoff:]
         with misc.ddp_sync(self.G_synthesis, sync):
             img = self.G_synthesis(ws)
+            if return_shifted:
+                w_shifted = ws + 1e-4
+                img_shifted = self.G_synthesis(w_shifted)
+                return [img, img_shifted], ws
+
         return img, ws
 
     def run_D(self, img, c, sync):
@@ -64,12 +87,18 @@ class StyleGAN2Loss(Loss):
         # Gmain: Maximize logits for generated images.
         if do_Gmain:
             with torch.autograd.profiler.record_function('Gmain_forward'):
-                gen_img, _gen_ws = self.run_G(gen_z, gen_c, sync=(sync and not do_Gpl)) # May get synced by Gpl.
+                [gen_img, gen_img_shifted], _gen_ws = self.run_G(gen_z, gen_c, sync=(sync and not do_Gpl), return_shifted=True) # May get synced by Gpl.
                 gen_logits = self.run_D(gen_img, gen_c, sync=False)
                 training_stats.report('Loss/scores/fake', gen_logits)
                 training_stats.report('Loss/signs/fake', gen_logits.sign())
-                loss_Gmain = torch.nn.functional.softplus(-gen_logits) # -log(sigmoid(gen_logits))
+                # G shifted loss + Gmain loss!
+                gen_img_features = self.id_loss.extract_feats(resize_img(gen_img))
+                gen_img_shifted_features = self.id_loss.extract_feats(resize_img(gen_img_shifted))
+                loss_G_shifted = (1 - torch.bmm(gen_img_shifted_features.unsqueeze(1),
+                                                gen_img_features.unsqueeze(2))).squeeze(dim=2)
+                loss_Gmain = torch.nn.functional.softplus(-gen_logits) + loss_G_shifted  # -log(sigmoid(gen_logits))
                 training_stats.report('Loss/G/loss', loss_Gmain)
+                training_stats.report('Loss/G/faceid_loss', loss_G_shifted)
             with torch.autograd.profiler.record_function('Gmain_backward'):
                 loss_Gmain.mean().mul(gain).backward()
 

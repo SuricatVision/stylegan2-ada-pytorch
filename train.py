@@ -188,7 +188,7 @@ def setup_training_loop_kwargs(
 
     args.total_kimg = spec.kimg
     args.batch_size = spec.mb
-    args.batch_gpu = spec.mb // spec.ref_gpus
+    args.batch_gpu = 2  # spec.mb // spec.ref_gpus
     args.ema_kimg = spec.ema
     args.ema_rampup = spec.ramp
 

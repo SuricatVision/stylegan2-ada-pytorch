@@ -1,4 +1,4 @@
-﻿# Copyright (c) 2021, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2021, NVIDIA CORPORATION.  All rights reserved.
 #
 # NVIDIA CORPORATION and its licensors retain all intellectual property
 # and proprietary rights in and to this software, related documentation
@@ -204,7 +204,12 @@ class MappingNetwork(torch.nn.Module):
             self.embed = FullyConnectedLayer(c_dim, embed_features)
         for idx in range(num_layers):
             in_features = features_list[idx]
+            # if idx != 0:
+            #     in_features *= self.num_ws
+            # Extension to W+ latent feature space!
             out_features = features_list[idx + 1]
+            if idx == num_layers - 1:
+                out_features *= 2  # self.num_ws
             layer = FullyConnectedLayer(in_features, out_features, activation=activation, lr_multiplier=lr_multiplier)
             setattr(self, f'fc{idx}', layer)
 
@@ -228,15 +233,20 @@ class MappingNetwork(torch.nn.Module):
             layer = getattr(self, f'fc{idx}')
             x = layer(x)
 
+        # NEW Broadcast!
+        with torch.autograd.profiler.record_function('broadcast'):
+            # x = torch.cat([x.unsqueeze(dim=1) for x in x.chunk(self.num_ws, dim=1)], dim=1)
+            x = torch.cat([w.unsqueeze(1).repeat([1, self.num_ws // 2, 1]) for w in x.chunk(2, dim=1)], dim=1)
         # Update moving average of W.
         if self.w_avg_beta is not None and self.training and not skip_w_avg_update:
             with torch.autograd.profiler.record_function('update_w_avg'):
-                self.w_avg.copy_(x.detach().mean(dim=0).lerp(self.w_avg, self.w_avg_beta))
+                # self.w_avg.copy_(x.detach().mean(dim=0).lerp(self.w_avg, self.w_avg_beta))
+                self.w_avg.copy_(x.detach().mean(dim=0).mean(dim=0).lerp(self.w_avg, self.w_avg_beta))
 
         # Broadcast.
-        if self.num_ws is not None:
-            with torch.autograd.profiler.record_function('broadcast'):
-                x = x.unsqueeze(1).repeat([1, self.num_ws, 1])
+        # if self.num_ws is not None:
+        #     with torch.autograd.profiler.record_function('broadcast'):
+        #         x = x.unsqueeze(1).repeat([1, self.num_ws, 1])
 
         # Apply truncation.
         if truncation_psi != 1:

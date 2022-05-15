@@ -14,6 +14,7 @@ import pickle
 import sys
 import tarfile
 import gzip
+import glob
 import zipfile
 from pathlib import Path
 from typing import Callable, Optional, Tuple, Union
@@ -50,7 +51,8 @@ def is_image_ext(fname: Union[str, Path]) -> bool:
 #----------------------------------------------------------------------------
 
 def open_image_folder(source_dir, *, max_images: Optional[int]):
-    input_images = [str(f) for f in sorted(Path(source_dir).rglob('*')) if is_image_ext(f) and os.path.isfile(f)]
+    # input_images = [str(f) for f in sorted(Path(source_dir).rglob('*')) if is_image_ext(f) and os.path.isfile(f)]
+    input_images = [str(f) for f in sorted(glob.glob(os.path.join(source_dir, "*/*"))) if is_image_ext(f) and os.path.isfile(f)]
 
     # Load labels.
     labels = {}
@@ -69,7 +71,10 @@ def open_image_folder(source_dir, *, max_images: Optional[int]):
         for idx, fname in enumerate(input_images):
             arch_fname = os.path.relpath(fname, source_dir)
             arch_fname = arch_fname.replace('\\', '/')
-            img = np.array(PIL.Image.open(fname))
+            try:
+                img = np.array(PIL.Image.open(fname))
+            except Exception:
+                continue
             yield dict(img=img, label=labels.get(arch_fname))
             if idx >= max_idx-1:
                 break
@@ -390,52 +395,59 @@ def convert_dataset(
     transform_image = make_transform(transform, width, height, resize_filter)
 
     dataset_attrs = None
-
+    
+    errors = 0
     labels = []
     for idx, image in tqdm(enumerate(input_iter), total=num_files):
-        idx_str = f'{idx:08d}'
-        archive_fname = f'{idx_str[:5]}/img{idx_str}.png'
+        try:
+            idx_str = f'{idx:08d}'
+            archive_fname = f'{idx_str[:5]}/img{idx_str}.png'
 
-        # Apply crop and resize.
-        img = transform_image(image['img'])
+            # Apply crop and resize.
+            img = transform_image(image['img'])
 
-        # Transform may drop images.
-        if img is None:
+            # Transform may drop images.
+            if img is None:
+                continue
+
+            # Error check to require uniform image attributes across
+            # the whole dataset.
+            channels = img.shape[2] if img.ndim == 3 else 1
+            cur_image_attrs = {
+                'width': img.shape[1],
+                'height': img.shape[0],
+                'channels': channels
+            }
+            if dataset_attrs is None:
+                dataset_attrs = cur_image_attrs
+                width = dataset_attrs['width']
+                height = dataset_attrs['height']
+                if width != height:
+                    error(f'Image dimensions after scale and crop are required to be square.  Got {width}x{height}')
+                if dataset_attrs['channels'] not in [1, 3]:
+                    error('Input images must be stored as RGB or grayscale')
+                if width != 2 ** int(np.floor(np.log2(width))):
+                    error('Image width/height after scale and crop are required to be power-of-two')
+            elif dataset_attrs != cur_image_attrs:
+                err = [f'  dataset {k}/cur image {k}: {dataset_attrs[k]}/{cur_image_attrs[k]}' for k in dataset_attrs.keys()]
+                error(f'Image {archive_fname} attributes must be equal across all images of the dataset.  Got:\n' + '\n'.join(err))
+
+            # Save the image as an uncompressed PNG.
+            img = PIL.Image.fromarray(img, { 1: 'L', 3: 'RGB' }[channels])
+            image_bits = io.BytesIO()
+            img.save(image_bits, format='png', compress_level=0, optimize=False)
+            save_bytes(os.path.join(archive_root_dir, archive_fname), image_bits.getbuffer())
+            labels.append([archive_fname, image['label']] if image['label'] is not None else None)
+        except Exception as e:
+            print(e)
+            errors += 1
             continue
-
-        # Error check to require uniform image attributes across
-        # the whole dataset.
-        channels = img.shape[2] if img.ndim == 3 else 1
-        cur_image_attrs = {
-            'width': img.shape[1],
-            'height': img.shape[0],
-            'channels': channels
-        }
-        if dataset_attrs is None:
-            dataset_attrs = cur_image_attrs
-            width = dataset_attrs['width']
-            height = dataset_attrs['height']
-            if width != height:
-                error(f'Image dimensions after scale and crop are required to be square.  Got {width}x{height}')
-            if dataset_attrs['channels'] not in [1, 3]:
-                error('Input images must be stored as RGB or grayscale')
-            if width != 2 ** int(np.floor(np.log2(width))):
-                error('Image width/height after scale and crop are required to be power-of-two')
-        elif dataset_attrs != cur_image_attrs:
-            err = [f'  dataset {k}/cur image {k}: {dataset_attrs[k]}/{cur_image_attrs[k]}' for k in dataset_attrs.keys()]
-            error(f'Image {archive_fname} attributes must be equal across all images of the dataset.  Got:\n' + '\n'.join(err))
-
-        # Save the image as an uncompressed PNG.
-        img = PIL.Image.fromarray(img, { 1: 'L', 3: 'RGB' }[channels])
-        image_bits = io.BytesIO()
-        img.save(image_bits, format='png', compress_level=0, optimize=False)
-        save_bytes(os.path.join(archive_root_dir, archive_fname), image_bits.getbuffer())
-        labels.append([archive_fname, image['label']] if image['label'] is not None else None)
 
     metadata = {
         'labels': labels if all(x is not None for x in labels) else None
     }
     save_bytes(os.path.join(archive_root_dir, 'dataset.json'), json.dumps(metadata))
+    print(f"Num errors = {errors}")
     close_dest()
 
 #----------------------------------------------------------------------------
