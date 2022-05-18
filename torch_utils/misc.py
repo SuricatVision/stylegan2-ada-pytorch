@@ -156,9 +156,15 @@ def copy_params_and_buffers(src_module, dst_module, require_all=False):
     src_tensors = {name: tensor for name, tensor in named_params_and_buffers(src_module)}
     for name, tensor in named_params_and_buffers(dst_module):
         assert (name in src_tensors) or (not require_all)
-        if "mapping.fc7" or "mapping.fc6" in name:  #  or "affine" in name:
-            name_pre = name.split('_')[0]+name.split('_')[-1]
-            pretrain_w = src_tensors[name].detach()
+        if "mapping.fc7"  in name or "mapping.fc6" in name:  #  or "affine" in name:
+            split = name.split('_')
+            if len(split)==3:
+                name_pre = split[0]+split[-1]
+            else:
+                name_pre = name
+            print('&&&&&&&&&&&&&&&&&&&&&&&&&')
+            print('copy -->',name,name_pre)
+            pretrain_w = src_tensors[name_pre].detach()
            
             tensor.copy_(pretrain_w).requires_grad_(tensor.requires_grad)
             continue

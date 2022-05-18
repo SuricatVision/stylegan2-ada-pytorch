@@ -12,7 +12,7 @@ from torch_utils import training_stats
 from torch_utils import misc
 from torch_utils.ops import conv2d_gradfix
 
-sys.path.insert(1, '/home/misha/stylegan2_pytorch')
+sys.path.insert(1, '/home/dereyly/progs/stylegan2_pytorch')
 from criteria.id_loss import IDLoss
 #----------------------------------------------------------------------------
 
@@ -51,7 +51,7 @@ class StyleGAN2Loss(Loss):
         self.pl_decay = pl_decay
         self.pl_weight = pl_weight
         self.pl_mean = torch.zeros([], device=device)
-        self.id_loss = IDLoss("/home/misha/stylegan2_pytorch/data/model_ir_se50.pth").to(device).eval()
+        self.id_loss = IDLoss("/home/dereyly/progs/stylegan2_pytorch/data/model_ir_se50.pth").to(device).eval()
 
     def run_G(self, z, c, sync, return_shifted=False):
         with misc.ddp_sync(self.G_mapping, sync):

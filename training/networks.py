@@ -176,18 +176,20 @@ class MappingNetwork(torch.nn.Module):
         z_dim,                      # Input latent (Z) dimensionality, 0 = no latent.
         c_dim,                      # Conditioning label (C) dimensionality, 0 = no label.
         w_dim,                      # Intermediate latent (W) dimensionality.
-        num_ws=2,                     # Number of intermediate latents to output, None = do not broadcast.
+        num_ws,                     # Number of intermediate latents to output, None = do not broadcast.
         num_layers      = 8,        # Number of mapping layers.
         embed_features  = None,     # Label embedding dimensionality, None = same as w_dim.
         layer_features  = None,     # Number of intermediate features in the mapping layers, None = same as w_dim.
         activation      = 'lrelu',  # Activation function: 'relu', 'lrelu', etc.
-        lr_multiplier   = 1, #.01,     # Learning rate multiplier for the mapping layers.
+        lr_multiplier   = 0.01, #.01,     # Learning rate multiplier for the mapping layers.
         w_avg_beta      = 0.995,    # Decay for tracking the moving average of W during training, None = do not track.
+        num_blocks = 2,
     ):
         super().__init__()
         self.z_dim = z_dim
         self.c_dim = c_dim
         self.w_dim = w_dim
+        self.num_blocks=num_blocks #num_ws
         self.num_ws = num_ws
         self.num_layers = num_layers
         self.w_avg_beta = w_avg_beta
@@ -209,9 +211,9 @@ class MappingNetwork(torch.nn.Module):
             # Extension to W+ latent feature space!
             out_features = features_list[idx + 1]
             if idx >= num_layers - 2:
-                for n_ws in range(self.num_ws):
+                for n_ws in range(self.num_blocks):
                     layer = FullyConnectedLayer(in_features, out_features, activation=activation, lr_multiplier=lr_multiplier)
-                    setattr(self, f'fc{idx}_{n_ws}', layer)
+                    setattr(self, f'fc{idx}_{n_ws}_', layer)
             else:
                 layer = FullyConnectedLayer(in_features, out_features, activation=activation, lr_multiplier=lr_multiplier)
                 setattr(self, f'fc{idx}', layer)
@@ -232,23 +234,35 @@ class MappingNetwork(torch.nn.Module):
                 x = torch.cat([x, y], dim=1) if x is not None else y
 
         # Main layers.
-        for idx in range(self.num_layers):
-            if idx >= num_layers - 2:
-                y = [[] for range(self.num_ws)]
-                for n_ws in range(self.num_ws):
-                    layer = getattr(self, f'fc{idx}_{n_ws}_')
-                    if idx >= num_layers - 2:
-                        y[n_ws] = layer(x)
-                    else:
-                        y[n_ws] = layer(y[n_ws])
-            else:
-                layer = getattr(self, f'fc{idx}')
-                x = layer(x)
+        # for idx in range(self.num_layers):
+        #     if idx >= self.num_layers - 2:
+        #         y = [[] for _ in range(self.num_ws)]
+        #         for n_ws in range(self.num_ws):
+        #             layer = getattr(self, f'fc{idx}_{n_ws}_')
+        #             if idx >= self.num_layers - 2:
+        #                 y[n_ws] = layer(x)
+        #             else:
+        #                 y[n_ws] = layer(y[n_ws])
+        #     else:
+        #         layer = getattr(self, f'fc{idx}')
+        #         x = layer(x)
+        for idx in range(self.num_layers-2):
+            layer = getattr(self, f'fc{idx}')
+            x = layer(x)
+        y = [[] for _ in range(self.num_blocks)]
+        for n_ws in range(self.num_blocks):
+            layer = getattr(self, f'fc{self.num_layers-2}_{n_ws}_')
+            y[n_ws] = layer(x)
+        for n_ws in range(self.num_blocks):
+            layer = getattr(self, f'fc{self.num_layers-1}_{n_ws}_')
+            y[n_ws] = layer(y[n_ws])
 
         # NEW Broadcast!
         with torch.autograd.profiler.record_function('broadcast'):
             # x = torch.cat([x.unsqueeze(dim=1) for x in x.chunk(self.num_ws, dim=1)], dim=1)
-            x = torch.cat([w.unsqueeze(1).repeat([1, self.num_ws // 2, 1]) for w in y], dim=1)
+            x = torch.cat([w.unsqueeze(1).repeat([1, self.num_ws // self.num_blocks, 1]) for w in y], dim=1)
+        # print('&&&&&&&&&&&&&&&&&&&&&&&&')
+        # print(x.shape)
         # Update moving average of W.
         if self.w_avg_beta is not None and self.training and not skip_w_avg_update:
             with torch.autograd.profiler.record_function('update_w_avg'):
